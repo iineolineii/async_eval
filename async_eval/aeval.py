@@ -1,23 +1,23 @@
 import asyncio
 from dataclasses import dataclass, field
 import sys
-from types import CodeType # type: ignore
 import typing
 from uuid import uuid4
 
 @dataclass
 class Session:
 	cached_code: dict[int, str] = field(default_factory=lambda: {})
-	variables: dict[str, typing.Any] = field(default_factory=lambda: {})
+	globals: dict[str, typing.Any] = field(default_factory=lambda: {})
+	locals: dict[str, typing.Any] = field(default_factory=lambda: {})
+
+	@property
+	def variables(self) -> dict[str, typing.Any]:
+		return self.globals | self.locals
 
 
 class AEvaluator:
 	def __init__(self) -> None:
 		self.session = Session()
-
-	@property
-	def variables(self) -> dict[str, typing.Any]:
-		return self.globals | self.locals
 
 	async def aeval(
 		self,
