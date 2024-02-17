@@ -28,7 +28,7 @@ class AEvaluator:
 	async def aeval(
 		self,
 		code: str,
-		glb: dict[str, typing.Any] = {},
+		glb: dict[str, typing.Any] = None, # type: ignore
 		*,
 		save_vars: bool = True,
 		**additional_vars: typing.Any
@@ -36,15 +36,29 @@ class AEvaluator:
 		"""Evaluate code in asynchronous mode.
 
 		Args:
-			code (`str`): The code to be evaluated.
-			glb (`dict[str, Any]`, *optional*): A dictionary of global variables to be set on the execution context. Defaults to an empty dict.
-			save_vars (`bool`, *optional*): If set to `True`, variables from current code execution will be saved session and can be used by future calls. Otherwise all code variables will be lost after it's execution.
-			additional_vars (`Any`, *optional*): Additional variables to be set on the execution context. Will be merged with `glb` after code execution, considered as locals.
+			code (`str`):\
+				The code to be evaluated.
+
+			glb (`dict[str, Any]`, *optional*):\
+				A dictionary of global variables to be set on the execution context.\
+				If empty, variables from past executions will be used.
+
+			save_vars (`bool`, *optional*):\
+				If set to `True`, variables from current code execution will be saved\
+				in session and can be used by future calls. Otherwise all code variables will be lost after this execution.
+
+			additional_vars (`Any`, *optional*):\
+				Additional variables to be set on the execution context.\
+				Considered as locals.
 
 		Returns:
 			Result of code evaluation or `typing.NoReturn` if the result is empty
 		"""
-		glb = glb or {} # Explicitly create a new dictionary for empty globals
+
+		# Use variables from past executions
+		if glb is None:
+			glb = self.session.globals
+			additional_vars = self.session.locals
 
 		# Store current code in the session
 		code_hash = uuid4().int
