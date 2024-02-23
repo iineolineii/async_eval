@@ -1,17 +1,22 @@
 import ast
 import asyncio
+import re
 import sys
+import traceback
 import typing
-from copy import copy
 from dataclasses import dataclass, field
+from types import TracebackType
 from uuid import uuid4
 
-from .utils import NodeTransformer, uniquify_name
+from .utils import NodeTransformer, extract_pointers, uniquify_name
 
+
+uuid4match = r"[a-f0-9]{8}-?[a-f0-9]{4}-?4[a-f0-9]{3}-?[89ab][a-f0-9]{3}-?[a-f0-9]{12}"
+code_filename = re.compile(rf"\<({uuid4match})\>")
 
 @dataclass
 class Session:
-	cached_code:    dict[int, str] = field(default_factory=lambda: {})
+	cached_code:    dict[str, str] = field(default_factory=lambda: {})
 	globals: dict[str, typing.Any] = field(default_factory=lambda: {})
 	locals:  dict[str, typing.Any] = field(default_factory=lambda: {})
 
@@ -34,9 +39,9 @@ class AEvaluator:
 	async def aeval(
 		self,
 		code: str,
-		glb: dict[str, typing.Any] = None, # type: ignore
+		glb: dict[str, typing.Any] = {},
 		*,
-		save_vars: bool = True,
+		isolate: bool = False,
 		**additional_vars: typing.Any
 	) -> typing.Any:
 		"""Evaluate code in asynchronous mode.
@@ -47,45 +52,50 @@ class AEvaluator:
 
 			glb (`dict[str, Any]`, *optional*):\
 				A dictionary of global variables to be set on the execution context.\
-				If empty, variables from past executions will be used.
+				If empty, variables from past executions will be used.\
+				Defaults to an empty dictionary.
 
-			save_vars (`bool`, *optional*):\
-				If set to `True`, variables from current code execution will be saved\
-				in session and can be used by future calls. Otherwise all code variables will be lost after this execution.
+			isolate (`bool`, *optional*):\
+				If set to `False`, variables from current code execution will be saved\
+				in session and can be used by future calls. Otherwise, current execution\
+				will use only it's own variables, which won't be saved in session.\
+				Defaults to False.
 
 			additional_vars (`Any`, *optional*):\
 				Additional variables to be set on the execution context.\
 				Considered as locals.
 
 		Returns:
-			Result of code evaluation or `typing.NoReturn` if the result is empty
+			Result of code evaluation or `typing.NoReturn` if the result is empty.
 		"""
 
+		# Make shallow copies of variable scopes
+		glb = glb.copy() or {}
+		additional_vars = additional_vars.copy()
+
 		# Use variables from past executions
-		if glb is None:
-			glb = self.session.globals
-			additional_vars = self.session.locals
+		if not isolate:
+			additional_vars.update(self.session.variables)
 
 		# Store current code in the session
-		code_hash = uuid4().int
+		code_hash = str(uuid4())
 		filename = f"<code {code_hash}>"
 		self.session.cached_code[code_hash] = code
 
-		if save_vars:
-			glb = copy(glb)
-			additional_vars = copy(additional_vars)
-
-		# Try to execute the code and get the result
+		# Try to execute user's code
 		try:
-			result, variables = await self.evaluate(code, filename, glb, additional_vars)
-
-		# Modify traceback for the occurred exception
-		except Exception as e:
-			traceback = self.patch_tb(*sys.exc_info())
-			raise e.with_traceback(traceback)
+			result, variables = await self.evaluate(
+				code,
+				filename,
+				glb,
+				additional_vars
+			)
+		# Patch raised exception
+		except:
+			self.exc_handler(*sys.exc_info()) # type: ignore
 
 		# Update variables if needed
-		if not save_vars:
+		if not isolate:
 			self.session.variables = variables
 
 		# Return proper result
@@ -100,9 +110,13 @@ class AEvaluator:
 	) -> tuple[typing.Any, tuple[dict[str, typing.Any], dict[str, typing.Any]]]:
 		code = code.strip()
 
-		typing_name = uniquify_name("typing", _globals)
-		_globals[typing_name] = typing
+		# Make sure that typing is not overridden anywhere in the locals
+		typing_name = uniquify_name("typing", _locals)
+		_locals[typing_name] = typing
 		self.node_transformer = NodeTransformer(typing_name)
+
+		# Make sure that main function name is not overridden anywhere in the globals
+		function_name = uniquify_name("amain", _globals)
 
 		# Empty code means empty result ;)
 		if not code:
@@ -117,10 +131,10 @@ class AEvaluator:
 
 		# Wrap the code in async function
 		async_main = ast.AsyncFunctionDef(
-			name = "__amain",
+			name = function_name,
 			lineno = 1,
 			end_lineno = module.body[-1].end_lineno,
-			args = ast.arguments(posonlyargs=[], args=[], defaults=[], kwonlyargs=[]),
+			args = ast.arguments(posonlyargs=[], args=[], defaults=[], kwonlyargs=_locals.keys()),
 			body = module.body,
 			decorator_list = [],
 			returns = None
@@ -139,11 +153,11 @@ class AEvaluator:
 						lineno = 1,
 						col_offset = 0
 					),
-					slice = ast.Constant(value = "__amain"),
+					slice = ast.Constant(value = function_name),
 					ctx = ast.Store()
 				)
 			],
-			value = ast.Name(id = "__amain", ctx = ast.Load()),
+			value = ast.Name(id = function_name, ctx = ast.Load()),
 		)
 
 		# Apply new code structure
@@ -155,10 +169,10 @@ class AEvaluator:
 
 		# Compile and execute the code
 		compiled = compile(module, filename=filename, mode="exec") # type: ignore
-		exec(compiled, _globals, _locals)
+		exec(compiled, _globals)
 
 		# Execute main code function and get the result
-		result, metadata = await _locals["__amain"]()
+		result, metadata = await _locals[function_name](**_locals)
 
 		if not isinstance(metadata, tuple):
 			self.empty_result = True
@@ -166,12 +180,54 @@ class AEvaluator:
 
 		return result, metadata
 
+	def exc_handler(
+		self,
+		exc_type: type[BaseException],
+		exc_value: BaseException,
+		tb: TracebackType = None, # type: ignore
+	):
+		# TODO: Make some tests and determinate which frames needs to be hidden from the final traceback
+		hidden_frames = {}
+		pointers = extract_pointers("".join(traceback.format_tb(tb)))
+		frames: list[traceback.FrameSummary] = traceback.extract_tb(tb)
+		tb_lines: list[str] = []
+
+		for frame in frames:
+			filename: str = frame.filename
+			lineno: int | None = frame.lineno
+			name: str = frame.name
+			line: str | None = frame.line
+
+			# Skip unnecessary frames
+			if (filename, name) in hidden_frames:
+				continue
+
+			# Exception was raised in one of the cached codes
+			if search := code_filename.search(filename):
+				filename = "<code>"
+				code_hash = search.groups()[0]
+
+				# NOTE: In most cases FrameSummary.lineno shouldn't be None
+				if lineno is not None:
+					line = self.session.cached_code.get(code_hash)
+
+			pointer: str | None = pointers.pop((filename, lineno, name), None) # type: ignore
+
+			# Format current frame
+			tb_lines.append(f'  File "{filename}", line {lineno}, in {name}')
+			if line:
+				tb_lines.append(f'    {line}')
+			if pointer:
+				tb_lines.append(pointer)
+
+		print("\n".join(tb_lines))
+
 
 # Basic usage example
 async def main():
 	evaluator = AEvaluator()
 	result = await evaluator.aeval("code")
-	evaluator.session.variables
+	print(evaluator.session.variables)
 
 if __name__ == "__main__":
 	asyncio.run(main())

@@ -1,5 +1,6 @@
 import ast
 from copy import copy
+import re
 from typing import Iterable
 
 
@@ -14,7 +15,6 @@ def uniquify_name(name: str, namespace: Iterable[str]) -> str:
 		str: The new unique name
 
 	Examples:
-		.. code-block:: python
 		>>> uniquify_name("foo", {"foo", "bar", "baz"})
 		'_foo'
 		>>> uniquify_name("bar", {"foo", "bar", "baz"})
@@ -25,11 +25,21 @@ def uniquify_name(name: str, namespace: Iterable[str]) -> str:
 
 	return name
 
+def extract_pointers(traceback_text: str) -> dict[tuple[str, int, str], str]:
+	pattern = r'\s+File "(.*?)", line (\d+), in (.*?)\n\s+.*?\n(\s+[~^]+)'
+	matches: list[str] = re.findall(pattern, traceback_text)
+
+	pointers = {
+		(filename, int(lineno), name): pointer
+		for filename, lineno, name, pointer in matches
+	}
+
+	return pointers
 
 class NodeTransformer:
 	def __init__(
 		self,
-		typing_name: str
+		typing_name: str = "typing"
 	) -> None:
 		self.typing_name = typing_name
 
