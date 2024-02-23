@@ -221,13 +221,3 @@ class AEvaluator:
 				tb_lines.append(pointer)
 
 		print("\n".join(tb_lines))
-
-
-# Basic usage example
-async def main():
-	evaluator = AEvaluator()
-	result = await evaluator.aeval("code")
-	print(evaluator.session.variables)
-
-if __name__ == "__main__":
-	asyncio.run(main())
