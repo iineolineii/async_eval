@@ -1,8 +1,13 @@
 import ast
 from copy import copy
+from dataclasses import dataclass, field
 import re
 from typing import Iterable
+import typing
 
+
+uuid4match = r"[a-f0-9]{8}-?[a-f0-9]{4}-?4[a-f0-9]{3}-?[89ab][a-f0-9]{3}-?[a-f0-9]{12}"
+filename_pattern = re.compile(rf"\<code ({uuid4match})\>")
 
 def uniquify_name(name: str, namespace: Iterable[str]) -> str:
 	"""Generate completely unique name based on the old name
@@ -320,3 +325,19 @@ class NodeTransformer:
 		node = copy(node)
 		setattr(node, "ctx", ast.Load())
 		return node
+
+@dataclass
+class Session:
+	cached_code:    dict[str, str] = field(default_factory=lambda: {})
+	globals: dict[str, typing.Any] = field(default_factory=lambda: {})
+	locals:  dict[str, typing.Any] = field(default_factory=lambda: {})
+
+	@property
+	def variables(self) -> dict[str, typing.Any]:
+		return self.globals | self.locals
+
+	@variables.setter
+	def variables(self, value: tuple[dict[str, typing.Any], dict[str, typing.Any]]):
+		globals, locals = value
+		self.globals.update(globals)
+		self.locals.update(locals)

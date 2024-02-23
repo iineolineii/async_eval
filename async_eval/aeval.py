@@ -1,34 +1,12 @@
 import ast
-import asyncio
-import re
 import sys
 import traceback
 import typing
-from dataclasses import dataclass, field
 from types import TracebackType
 from uuid import uuid4
 
-from .utils import NodeTransformer, extract_pointers, uniquify_name
-
-
-uuid4match = r"[a-f0-9]{8}-?[a-f0-9]{4}-?4[a-f0-9]{3}-?[89ab][a-f0-9]{3}-?[a-f0-9]{12}"
-code_filename = re.compile(rf"\<({uuid4match})\>")
-
-@dataclass
-class Session:
-	cached_code:    dict[str, str] = field(default_factory=lambda: {})
-	globals: dict[str, typing.Any] = field(default_factory=lambda: {})
-	locals:  dict[str, typing.Any] = field(default_factory=lambda: {})
-
-	@property
-	def variables(self) -> dict[str, typing.Any]:
-		return self.globals | self.locals
-
-	@variables.setter
-	def variables(self, value: tuple[dict[str, typing.Any], dict[str, typing.Any]]):
-		globals, locals = value
-		self.globals.update(globals)
-		self.locals.update(locals)
+from .utils import (NodeTransformer, Session, extract_pointers,
+                    filename_pattern, uniquify_name)
 
 
 class AEvaluator:
@@ -203,7 +181,7 @@ class AEvaluator:
 				continue
 
 			# Exception was raised in one of the cached codes
-			if search := code_filename.search(filename):
+			if search := filename_pattern.search(filename):
 				filename = "<code>"
 				code_hash = search.groups()[0]
 
