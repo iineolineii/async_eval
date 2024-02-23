@@ -19,7 +19,6 @@ class AEvaluator:
 		self,
 		code: str,
 		glb: dict[str, typing.Any] = {},
-		*,
 		isolate: bool = False,
 		**additional_vars: typing.Any
 	) -> typing.Any:
