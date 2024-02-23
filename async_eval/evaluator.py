@@ -11,6 +11,11 @@ from .utils import (NodeTransformer, Session, extract_pointers,
 
 
 class AEvaluator:
+
+    @property
+    def variables(self) -> dict[str, typing.Any]:
+        return self.session.variables
+    
 	def __init__(self) -> None:
 		self.session = Session()
 		self.empty_result = False
