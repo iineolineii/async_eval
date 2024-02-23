@@ -53,7 +53,8 @@ class AEvaluator:
 
 		# Use variables from past executions
 		if not isolate:
-			additional_vars.update(self.session.variables)
+			glb.update(self.session.globals)
+			additional_vars.update(self.session.locals)
 
 		# Store current code in the session
 		self.code_hash = str(uuid4())
