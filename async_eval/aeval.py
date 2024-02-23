@@ -1,4 +1,5 @@
 import ast
+import re
 import sys
 import traceback
 import typing
@@ -56,21 +57,19 @@ class AEvaluator:
 			additional_vars.update(self.session.variables)
 
 		# Store current code in the session
-		code_hash = str(uuid4())
-		filename = f"<code {code_hash}>"
-		self.session.cached_code[code_hash] = code
+		self.code_hash = str(uuid4())
+		filename = f"<code {self.code_hash}>"
+		self.session.cached_code[self.code_hash] = code
 
-		# Try to execute user's code
-		try:
-			result, variables = await self.evaluate(
-				code,
-				filename,
-				glb,
-				additional_vars
-			)
-		# Patch raised exception
-		except:
-			self.exc_handler(*sys.exc_info()) # type: ignore
+		excepthook = sys.excepthook
+		sys.excepthook = self.exc_handler
+		result, variables = await self.evaluate(
+			code,
+			filename,
+			glb,
+			additional_vars
+		)
+		sys.excepthook = excepthook
 
 		# Update variables if needed
 		if not isolate:
@@ -94,7 +93,7 @@ class AEvaluator:
 		self.node_transformer = NodeTransformer(typing_name)
 
 		# Make sure that main function name is not overridden anywhere in the globals
-		function_name = uniquify_name("amain", _globals)
+		self.function_name = uniquify_name("amain", _globals)
 
 		# Empty code means empty result ;)
 		if not code:
@@ -102,17 +101,21 @@ class AEvaluator:
 			return None, ({}, {})
 
 		# Parse the code
-		module = ast.parse(code, filename="<code>")
+		module = ast.parse(code, filename=filename)
 
 		# Modify the code for evaluation
 		module: ast.Module = self.node_transformer.transform_module(module)
 
+		# Create arguments list from the locals
+		kwonlyargs = [ast.arg(arg=name) for name in _locals]
+		kw_defaults = [None] * len(kwonlyargs)
+
 		# Wrap the code in async function
 		async_main = ast.AsyncFunctionDef(
-			name = function_name,
+			name = self.function_name,
 			lineno = 1,
 			end_lineno = module.body[-1].end_lineno,
-			args = ast.arguments(posonlyargs=[], args=[], defaults=[], kwonlyargs=_locals.keys()),
+			args = ast.arguments(posonlyargs=[], args=[], defaults=[], kwonlyargs=kwonlyargs, kw_defaults=kw_defaults),
 			body = module.body,
 			decorator_list = [],
 			returns = None
@@ -131,11 +134,11 @@ class AEvaluator:
 						lineno = 1,
 						col_offset = 0
 					),
-					slice = ast.Constant(value = function_name),
+					slice = ast.Constant(value = self.function_name),
 					ctx = ast.Store()
 				)
 			],
-			value = ast.Name(id = function_name, ctx = ast.Load()),
+			value = ast.Name(id = self.function_name, ctx = ast.Load()),
 		)
 
 		# Apply new code structure
@@ -150,13 +153,16 @@ class AEvaluator:
 		exec(compiled, _globals)
 
 		# Execute main code function and get the result
-		result, metadata = await _locals[function_name](**_locals)
+		result = await _globals[self.function_name](**_locals)
 
-		if not isinstance(metadata, tuple):
+		# There's no value for result
+		if len(result) == 2:
 			self.empty_result = True
-			return None, ({}, {})
+			glb, loc = result
+			result = [None, glb, loc]
 
-		return result, metadata
+		result, *variables = result
+		return result, variables # type: ignore
 
 	def exc_handler(
 		self,
@@ -164,12 +170,31 @@ class AEvaluator:
 		exc_value: BaseException,
 		tb: TracebackType = None, # type: ignore
 	):
-		# TODO: Make some tests and determinate which frames needs to be hidden from the final traceback
-		hidden_frames = {}
-		pointers = extract_pointers("".join(traceback.format_tb(tb)))
-		frames: list[traceback.FrameSummary] = traceback.extract_tb(tb)
-		tb_lines: list[str] = []
+		frames = self.format_frames(tb)
+		frames.insert(0, "Traceback (most recent call last):")
+		exc_info = self.format_exc_info(exc_value)
 
+		if exc_type == SyntaxError:
+			if search := filename_pattern.search(exc_info):
+				code_hash = search.groups()[0]
+
+				if code_hash == self.code_hash:
+					exc_info = exc_info.replace(f'<code {code_hash}>', "<code>")
+					del frames[-1]
+
+		frames.append(exc_info)
+		print("\n".join(frames))
+
+	def format_frames(
+		self,
+		tb: TracebackType
+	) -> list[str]:
+		frames: typing.Iterable[traceback.FrameSummary] = traceback.extract_tb(tb)
+
+		hidden_frames = {(__file__, self.function_name), (__file__, "evaluate"), (__file__, "aeval")}
+		pointers = extract_pointers("".join(traceback.format_tb(tb)))
+
+		patched_frames = []
 		for frame in frames:
 			filename: str = frame.filename
 			lineno: int | None = frame.lineno
@@ -182,20 +207,37 @@ class AEvaluator:
 
 			# Exception was raised in one of the cached codes
 			if search := filename_pattern.search(filename):
-				filename = "<code>"
 				code_hash = search.groups()[0]
+
+				if code_hash not in self.session.cached_code:
+					continue
+
+				filename = "<code>"
+
+				if name == self.function_name:
+					name = "<module>"
 
 				# NOTE: In most cases FrameSummary.lineno shouldn't be None
 				if lineno is not None:
-					line = self.session.cached_code.get(code_hash)
+					code = self.session.cached_code[code_hash]
+					line = code.splitlines()[lineno-1]
 
 			pointer: str | None = pointers.pop((filename, lineno, name), None) # type: ignore
 
 			# Format current frame
-			tb_lines.append(f'  File "{filename}", line {lineno}, in {name}')
+			patched_frames.append(f'  File "{filename}", line {lineno}, in {name}')
 			if line:
-				tb_lines.append(f'    {line}')
+				patched_frames[-1] += f"\n    {line}"
 			if pointer:
-				tb_lines.append(pointer)
+				patched_frames[-1] += f"\n{pointer}"
+			patched_frames[-1] += "\n"
 
-		print("\n".join(tb_lines))
+		return patched_frames
+
+	def format_exc_info(
+		self,
+		exc_value: BaseException
+	):
+		# Format exception info
+		exc_info = "".join(traceback.format_exception_only(exc_value))
+		return exc_info

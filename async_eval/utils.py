@@ -31,7 +31,7 @@ def uniquify_name(name: str, namespace: Iterable[str]) -> str:
 	return name
 
 def extract_pointers(traceback_text: str) -> dict[tuple[str, int, str], str]:
-	pattern = r'\s+File "(.*?)", line (\d+), in (.*?)\n\s+.*?\n(\s+[~^]+)'
+	pattern = r'  File "(.*?)", line (\d+), in (.*?)\n    .*?\n(    [~^]+)'
 	matches: list[str] = re.findall(pattern, traceback_text)
 
 	pointers = {
@@ -56,15 +56,14 @@ class NodeTransformer:
 		module = self.patch_returns(module) # Patch all returns outside of any function def
 		module.body[-1] = self.patch_statement(module.body[-1])
 
-		# Empty result
-		value = ast.Constant(
-			value = True,
-			kind = None
-		)
+		#region: Empty result
+		glb = ast.copy_location(ast.Call(func=ast.Name(id = "globals", ctx = ast.Load()), args=[], keywords=[]), old_node=module.body[-1])
+		loc = ast.copy_location(ast.Call(func=ast.Name(id = "locals", ctx = ast.Load()), args=[], keywords=[]), old_node=module.body[-1])
 
-		node = self.handle_Return(ast.Return(value=value))
-		node.lineno = node.end_lineno = module.body[-1].end_lineno # type: ignore
-		module.body.append(node)
+		patched = ast.Return(value=ast.Tuple(elts=[glb, loc], ctx=ast.Load()))
+		patched = ast.copy_location(patched, module.body[-1])
+		module.body.append(patched)
+		#endregion
 
 		return module
 
@@ -151,13 +150,7 @@ class NodeTransformer:
 		glb = ast.copy_location(ast.Call(func=ast.Name(id = "globals", ctx = ast.Load()), args=[], keywords=[]), node)
 		loc = ast.copy_location(ast.Call(func=ast.Name(id = "locals", ctx = ast.Load()), args=[], keywords=[]), node)
 
-		update = ast.copy_location(ast.BinOp(
-			left=glb,
-			op=ast.BitOr(),
-			right=loc
-		), node)
-
-		value = ast.Tuple(elts=[value, update], ctx=ast.Load())
+		value = ast.Tuple(elts=[value, glb, loc], ctx=ast.Load())
 		value = ast.copy_location(value, node)
 
 		patched = ast.Return(value=value)
