@@ -6,18 +6,23 @@ from types import TracebackType
 from uuid import uuid4
 
 from .utils import (NodeTransformer, Session, extract_pointers,
-					filename_pattern, uniquify_name)
+                    filename_pattern, uniquify_name)
 
 
 class AEvaluator:
+	def __init__(
+		self,
+		session: Session = None, # type: ignore
+		node_transformer: NodeTransformer = None # type: ignore
+	) -> None:
+
+		self.session = Session() if session is None else session
+		self.node_transformer = NodeTransformer() if node_transformer is None else node_transformer
+		self.empty_result = False
 
 	@property
 	def variables(self) -> dict[str, typing.Any]:
 		return self.session.variables
-
-	def __init__(self) -> None:
-		self.session = Session()
-		self.empty_result = False
 
 	async def aeval(
 		self,
@@ -92,9 +97,9 @@ class AEvaluator:
 		code = code.strip()
 
 		# Make sure that typing is not overridden anywhere in the locals
-		typing_name = uniquify_name("typing", _locals)
+		typing_name = uniquify_name(self.node_transformer.typing_name, _locals)
 		_locals[typing_name] = typing
-		self.node_transformer = NodeTransformer(typing_name)
+		self.node_transformer.typing_name = typing_name
 
 		# Make sure that main function name is not overridden anywhere in the globals
 		self.function_name = uniquify_name("amain", _globals)
