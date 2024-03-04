@@ -1,5 +1,4 @@
 import ast
-import re
 import sys
 import traceback
 import typing
@@ -185,7 +184,7 @@ class AEvaluator:
 	):
 		frames = self.format_frames(tb)
 		frames.insert(0, "Traceback (most recent call last):")
-		exc_info = self.format_exc_info(exc_value)
+		exc_info = self.format_exc_info(exc_type, exc_value)
 
 		if exc_type == SyntaxError:
 			if search := filename_pattern.search(exc_info):
@@ -210,9 +209,9 @@ class AEvaluator:
 		patched_frames = []
 		for frame in frames:
 			filename: str = frame.filename
-			lineno: int | None = frame.lineno
+			lineno: typing.Optional[int] = frame.lineno
 			name: str = frame.name
-			line: str | None = frame.line
+			line: typing.Optional[str] = frame.line
 
 			# Skip unnecessary frames
 			if (filename, name) in hidden_frames:
@@ -249,8 +248,9 @@ class AEvaluator:
 
 	def format_exc_info(
 		self,
+		exc_type: type[BaseException],
 		exc_value: BaseException
 	):
 		# Format exception info
-		exc_info = "".join(traceback.format_exception_only(exc_value))
+		exc_info = "".join(traceback.format_exception_only(exc_type, exc_value))
 		return exc_info
