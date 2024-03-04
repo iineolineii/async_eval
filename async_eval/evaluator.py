@@ -175,6 +175,14 @@ class AEvaluator:
 		exc_value: BaseException,
 		tb: TracebackType = None, # type: ignore
 	):
+		print(self.format_tb(exc_type, exc_value, tb))
+
+	def format_tb(
+		self,
+		exc_type: type[BaseException],
+		exc_value: BaseException,
+		tb: TracebackType = None, # type: ignore
+	):
 		frames = self.format_frames(tb)
 		frames.insert(0, "Traceback (most recent call last):")
 		exc_info = self.format_exc_info(exc_value)
@@ -188,7 +196,7 @@ class AEvaluator:
 					del frames[-1]
 
 		frames.append(exc_info)
-		print("\n".join(frames))
+		return "\n".join(frames)
 
 	def format_frames(
 		self,
