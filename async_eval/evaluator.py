@@ -7,15 +7,15 @@ from types import TracebackType
 from uuid import uuid4
 
 from .utils import (NodeTransformer, Session, extract_pointers,
-                    filename_pattern, uniquify_name)
+					filename_pattern, uniquify_name)
 
 
 class AEvaluator:
 
-    @property
-    def variables(self) -> dict[str, typing.Any]:
-        return self.session.variables
-    
+	@property
+	def variables(self) -> dict[str, typing.Any]:
+		return self.session.variables
+
 	def __init__(self) -> None:
 		self.session = Session()
 		self.empty_result = False
