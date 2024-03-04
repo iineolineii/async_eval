@@ -18,7 +18,6 @@ async def aeval(
 
 		glb (`dict[str, Any]`, *optional*):\
 			A dictionary of global variables to be set on the execution context.\
-			If empty, variables from past executions will be used.\
 			Defaults to an empty dictionary.
 
 		additional_vars (`Any`, *optional*):\

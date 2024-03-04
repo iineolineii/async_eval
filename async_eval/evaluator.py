@@ -1,5 +1,4 @@
 import ast
-import re
 import sys
 import traceback
 import typing
