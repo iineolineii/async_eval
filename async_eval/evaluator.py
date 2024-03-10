@@ -34,21 +34,21 @@ class AEvaluator:
 		"""Evaluate code in asynchronous mode.
 
 		Args:
-			code (`str`):\
+			code (`str`):
 				The code to be evaluated.
 
-			glb (`dict[str, Any]`, *optional*):\
+			glb (`dict[str, Any]`, *optional*):
 				A dictionary of global variables to be set on the execution context.\
 				If empty, variables from past executions will be used.\
 				Defaults to an empty dictionary.
 
-			isolate (`bool`, *optional*):\
+			isolate (`bool`, *optional*):
 				If set to `False`, variables from current code execution will be saved\
 				in session and can be used by future calls. Otherwise, current execution\
 				will use only it's own variables, which won't be saved in session.\
 				Defaults to False.
 
-			additional_vars (`Any`, *optional*):\
+			additional_vars (`Any`, *optional*):
 				Additional variables to be set on the execution context.\
 				Considered as locals.
 
@@ -71,8 +71,8 @@ class AEvaluator:
 		self.session.cached_code[self.code_hash] = code
 
 		excepthook = sys.excepthook
-		sys.excepthook = self.exc_handler
-		result, variables = await self.evaluate(
+		sys.excepthook = self._exc_handler
+		result, variables = await self._evaluate(
 			code,
 			filename,
 			glb,
@@ -87,7 +87,7 @@ class AEvaluator:
 		# Return proper result
 		return result if not self.empty_result else typing.NoReturn
 
-	async def evaluate(
+	async def _evaluate(
 		self,
 		code: str,
 		filename: str,
@@ -173,7 +173,7 @@ class AEvaluator:
 		result, *variables = result
 		return result, variables # type: ignore
 
-	def exc_handler(
+	def _exc_handler(
 		self,
 		exc_type: type[BaseException],
 		exc_value: BaseException,
@@ -187,8 +187,9 @@ class AEvaluator:
 		exc_value: BaseException,
 		tb: TracebackType = None, # type: ignore
 	):
-		frames = self.format_frames(tb)
+		frames = self._format_frames(tb)
 		frames.insert(0, "Traceback (most recent call last):")
+
 		exc_info = self.format_exc_info(exc_type, exc_value)
 
 		if exc_type == SyntaxError:
@@ -202,13 +203,13 @@ class AEvaluator:
 		frames.append(exc_info)
 		return "\n".join(frames)
 
-	def format_frames(
+	def _format_frames(
 		self,
 		tb: TracebackType
 	) -> list[str]:
 		frames: typing.Iterable[traceback.FrameSummary] = traceback.extract_tb(tb)
 
-		hidden_frames = {(__file__, self.function_name), (__file__, "evaluate"), (__file__, "aeval")}
+		self.hidden_frames = {(__file__, self.function_name), (__file__, self._evaluate.__name__), (__file__, self.aeval.__name__)}
 		pointers = extract_pointers("".join(traceback.format_tb(tb)))
 
 		patched_frames = []
@@ -219,7 +220,7 @@ class AEvaluator:
 			line: typing.Optional[str] = frame.line
 
 			# Skip unnecessary frames
-			if (filename, name) in hidden_frames:
+			if (filename, name) in self.hidden_frames:
 				continue
 
 			# Exception was raised in one of the cached codes
@@ -251,7 +252,7 @@ class AEvaluator:
 
 		return patched_frames
 
-	def format_exc_info(
+	def _format_exc_info(
 		self,
 		exc_type: type[BaseException],
 		exc_value: BaseException
