@@ -319,9 +319,32 @@ class NodeTransformer:
 		setattr(node, "ctx", ast.Load())
 		return node
 
+
+@dataclass
+class _PatchedFrame:
+	filename: str
+	lineno: int
+	name: str
+	line: str = field(default="", init=False)
+	pointer: str = field(default="", init=False)
+
+	def __str__(self) -> str: # type: ignore
+		frame_info = f'  File "{self.filename}", line {self.lineno}, in <{self.name}>'
+
+		if self.line:
+			frame_info += f"\n    {self.line}"
+		if self.line:
+			frame_info += f"\n{self.pointer}"
+
+@dataclass
+class ExecutionInfo:
+	code:    str
+	globals: dict[str, typing.Any] = field(default_factory=lambda: {})
+	locals:  dict[str, typing.Any] = field(default_factory=lambda: {})
+
 @dataclass
 class Session:
-	cached_code:    dict[str, str] = field(default_factory=lambda: {})
+	cache:        dict[str, ExecutionInfo] = field(default_factory=lambda: {})
 	globals: dict[str, typing.Any] = field(default_factory=lambda: {})
 	locals:  dict[str, typing.Any] = field(default_factory=lambda: {})
 

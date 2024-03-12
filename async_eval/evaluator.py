@@ -2,11 +2,12 @@ import ast
 import sys
 import traceback
 import typing
+from dataclasses import dataclass, field
 from types import TracebackType
 from uuid import uuid4
 
-from .utils import (NodeTransformer, Session, extract_pointers,
-                    filename_pattern, uniquify_name)
+from .utils import (_PatchedFrame, ExecutionInfo, NodeTransformer, Session, extract_pointers,
+					filename_pattern, uniquify_name)
 
 
 class AEvaluator:
@@ -61,15 +62,21 @@ class AEvaluator:
 		additional_vars = additional_vars.copy()
 
 		# Use variables from past executions
+		# and pre-save current ones in the session
 		if not isolate:
 			glb.update(self.session.globals)
 			additional_vars.update(self.session.locals)
 
+			# Save execution info
+			exec_info = ExecutionInfo(code, glb, additional_vars)
+			self.session.cache[self.code_hash] = exec_info
+
 		# Store current code in the session
 		self.code_hash = str(uuid4())
 		filename = f"<code {self.code_hash}>"
-		self.session.cached_code[self.code_hash] = code
 
+		# Setup excepthook for executing the code
+		# and bring back the old one after this
 		excepthook = sys.excepthook
 		sys.excepthook = self._exc_handler
 		result, variables = await self._evaluate(
@@ -83,6 +90,7 @@ class AEvaluator:
 		# Update variables if needed
 		if not isolate:
 			self.session.variables = variables
+			exec_info.globals, exec_info.locals = variables
 
 		# Return proper result
 		return result if not self.empty_result else typing.NoReturn
@@ -187,31 +195,49 @@ class AEvaluator:
 		exc_value: BaseException,
 		tb: TracebackType = None, # type: ignore
 	):
-		frames = self._format_frames(tb)
-		frames.insert(0, "Traceback (most recent call last):")
-		exc_info = self._format_exc_info(exc_value)
+		frames, exc_info = self.patch_tb(exc_type, exc_value, tb)
 
-		if exc_type == SyntaxError:
-			if search := filename_pattern.search(exc_info):
-				code_hash = search.groups()[0]
+		frames.insert(0, "Traceback (most recent call last):") # type: ignore
+		frames.append(exc_info) # type: ignore
 
-				if code_hash == self.code_hash:
-					exc_info = exc_info.replace(f'<code {code_hash}>', "<code>")
-					del frames[-1]
+		return "\n".join(map(str, frames))
 
-		frames.append(exc_info)
-		return "\n".join(frames)
-
-	def _format_frames(
+	def _patch_frames(
 		self,
-		tb: TracebackType
-	) -> list[str]:
+		exc_type: type[BaseException],
+		tb: TracebackType = None, # type: ignore
+	) -> list[_PatchedFrame]:
+		"""
+		Filters and patches a traceback object (`tb`) for formatting purposes.
+
+		This function extracts frames from the traceback, hides internal frames,
+		and replaces relevant information for custom formatting.
+
+		Args:
+			exc_type (type[BaseException]): The exception's type.
+			tb (TracebackType): The traceback object to process.
+
+		Returns:
+			List[_PatchedFrame]: A list of custom frame objects containing
+								patched information for formatting.
+
+		Note:
+			For syntax errors the last frame will be omitted,
+			so it is recommended to also patch the exception info
+			using the `_patch_exc_info` method.
+		"""
+
+		# Extract native frames
 		frames: typing.Iterable[traceback.FrameSummary] = traceback.extract_tb(tb)
 
+		# Define internal frames needed to be hidden
 		self.hidden_frames = {(__file__, self.function_name), (__file__, self._evaluate.__name__), (__file__, self.aeval.__name__)}
+
+		# Extract the pointers using regex
 		pointers = extract_pointers("".join(traceback.format_tb(tb)))
 
-		patched_frames = []
+		# Iterate through native frames
+		patched_frames: list[_PatchedFrame] = []
 		for frame in frames:
 			filename: str = frame.filename
 			lineno: int | None = frame.lineno
@@ -222,39 +248,79 @@ class AEvaluator:
 			if (filename, name) in self.hidden_frames:
 				continue
 
-			# Exception was raised in one of the cached codes
+			# Exception seems to be raised in one of the cached executions
 			if search := filename_pattern.search(filename):
 				code_hash = search.groups()[0]
 
-				if code_hash not in self.session.cached_code:
+				# But we didn't cache it
+				if code_hash not in self.session.cache:
 					continue
 
-				filename = "<code>"
+				# Get the execution info from the session
+				exec_info = self.session.cache[code_hash]
 
-				if name == self.function_name:
+				# Error originating from the user given code
+				if name == exec_info.code:
 					name = "<module>"
 
 				# NOTE: In most cases FrameSummary.lineno shouldn't be None
+				# For more info check: https://github.com/python/cpython/issues/94485#issuecomment-1172538320
 				if lineno is not None:
-					code = self.session.cached_code[code_hash]
+					code = exec_info.code
 					line = code.splitlines()[lineno-1]
 
-			pointer: str | None = pointers.pop((filename, lineno, name), None) # type: ignore
+				filename = "<code>"
 
-			# Format current frame
-			patched_frames.append(f'  File "{filename}", line {lineno}, in {name}')
+			# Get optional pointer for the current frame
+			pointer: str = pointers.pop((filename, lineno, name), "") # type: ignore
+
+			# Recreate current frame with new info
+			patched_frames.append(_PatchedFrame(filename, lineno, name)) # type: ignore
+
+			# Adjust frame info if possible
 			if line:
-				patched_frames[-1] += f"\n    {line}"
+				patched_frames[-1].line = line
 			if pointer:
-				patched_frames[-1] += f"\n{pointer}"
-			patched_frames[-1] += "\n"
+				patched_frames[-1].pointer = pointer
+
+		# Pop the last frame for proper SyntaxError handling
+		if patched_frames and exc_type == SyntaxError:
+			patched_frames.pop()
 
 		return patched_frames
 
-	def _format_exc_info(
+	def _patch_exc_info(
 		self,
+		exc_type: type[BaseException],
 		exc_value: BaseException
-	):
-		# Format exception info
+	) -> str:
+		"""
+		Format exception info according to the exception type.
+
+		Note:
+			In most cases the return value will match the
+			`traceback.format_exception_only`, however in some cases
+			additional formatting may be applied for the syntax errors.
+		"""
+
 		exc_info = "".join(traceback.format_exception_only(exc_value))
+
+		if exc_type == SyntaxError:
+			if search := filename_pattern.search(exc_info):
+				code_hash = search.groups()[0]
+
+				if code_hash == self.code_hash:
+					exc_info = exc_info.replace(f'<code {code_hash}>', "<code>")
+
 		return exc_info
+
+	def patch_tb(
+		self,
+		exc_type: type[BaseException],
+		exc_value: BaseException,
+		tb: TracebackType = None, # type: ignore
+	):
+		frames = self._patch_frames(exc_type, tb)
+		exc_info = self._patch_exc_info(exc_type, exc_value)
+
+		return frames, exc_info
