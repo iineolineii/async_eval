@@ -321,7 +321,7 @@ class NodeTransformer:
 
 
 @dataclass
-class _PatchedFrame:
+class PatchedFrame:
 	filename: str
 	lineno: int
 	name: str
@@ -341,10 +341,11 @@ class ExecutionInfo:
 	code:    str
 	globals: dict[str, typing.Any] = field(default_factory=lambda: {})
 	locals:  dict[str, typing.Any] = field(default_factory=lambda: {})
+	function_name: str = field(init=False)
 
 @dataclass
 class Session:
-	cache:        dict[str, ExecutionInfo] = field(default_factory=lambda: {})
+	cache:    dict[str, ExecutionInfo] = field(default_factory=lambda: {})
 	globals: dict[str, typing.Any] = field(default_factory=lambda: {})
 	locals:  dict[str, typing.Any] = field(default_factory=lambda: {})
 

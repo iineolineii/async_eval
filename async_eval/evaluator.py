@@ -6,8 +6,8 @@ from dataclasses import dataclass, field
 from types import TracebackType
 from uuid import uuid4
 
-from .utils import (_PatchedFrame, ExecutionInfo, NodeTransformer, Session, extract_pointers,
-					filename_pattern, uniquify_name)
+from .utils import (ExecutionInfo, NodeTransformer, Session, PatchedFrame,
+                    extract_pointers, filename_pattern, uniquify_name)
 
 
 class AEvaluator:
@@ -194,7 +194,13 @@ class AEvaluator:
 		exc_type: type[BaseException],
 		exc_value: BaseException,
 		tb: TracebackType = None, # type: ignore
-	):
+	) -> str:
+		"""
+		Formats the current exception traceback from the `sys.exc_info()` into a user-friendly string.
+
+		Returns:
+			`str`: A multi-line string presenting the formatted traceback information.
+		"""
 		frames, exc_info = self.patch_tb(exc_type, exc_value, tb)
 
 		frames.insert(0, "Traceback (most recent call last):") # type: ignore
@@ -202,11 +208,47 @@ class AEvaluator:
 
 		return "\n".join(map(str, frames))
 
-	def _patch_frames(
+	def patch_tb(
 		self,
 		exc_type: type[BaseException],
+		exc_value: BaseException,
 		tb: TracebackType = None, # type: ignore
-	) -> list[_PatchedFrame]:
+	) -> tuple[list[PatchedFrame], str]:
+		"""
+		Processes a `sys.exc_info()` traceback info for customized formatting.
+
+		This method prepares a traceback object for display by:
+
+		- Filtering and patching individual frames:
+			- Internal frames are hidden.
+			- Relevant information within frames is potentially modified.
+		- Formatting the exception information based on the exception type.
+
+		Returns:
+			A list of custom frames and a string representing the exception details.
+		"""
+
+		# Get list of raw patched frames
+		frames = self._patch_frames(tb)
+
+		# Pop the last frame for proper SyntaxError displaying
+		if (
+			exc_type == SyntaxError
+			and frames # Traceback is not empty
+			and (exec_info := self._get_exec_info(frames[-1].filename)) # Exception raised in one of the cached executions
+			and exec_info.function_name == self.function_name # Exception originating from the current execution code
+		):
+			frames.pop()
+
+		# Format the exception info
+		exc_info = self._patch_exc_info(exc_type, exc_value)
+
+		return frames, exc_info
+
+	def _patch_frames(
+		self,
+		tb: TracebackType = None, # type: ignore
+	) -> list[PatchedFrame]:
 		"""
 		Filters and patches a traceback object (`tb`) for formatting purposes.
 
@@ -214,17 +256,10 @@ class AEvaluator:
 		and replaces relevant information for custom formatting.
 
 		Args:
-			exc_type (type[BaseException]): The exception's type.
-			tb (TracebackType): The traceback object to process.
+			`tb` (`TracebackType`): The traceback object to process.
 
 		Returns:
-			List[_PatchedFrame]: A list of custom frame objects containing
-								patched information for formatting.
-
-		Note:
-			For syntax errors the last frame will be omitted,
-			so it is recommended to also patch the exception info
-			using the `_patch_exc_info` method.
+			A list of custom frames containing patched information for formatting.
 		"""
 
 		# Extract native frames
@@ -237,7 +272,7 @@ class AEvaluator:
 		pointers = extract_pointers("".join(traceback.format_tb(tb)))
 
 		# Iterate through native frames
-		patched_frames: list[_PatchedFrame] = []
+		patched_frames: list[PatchedFrame] = []
 		for frame in frames:
 			filename: str = frame.filename
 			lineno: int | None = frame.lineno
@@ -248,18 +283,10 @@ class AEvaluator:
 			if (filename, name) in self.hidden_frames:
 				continue
 
-			# Exception seems to be raised in one of the cached executions
-			if search := filename_pattern.search(filename):
-				code_hash = search.groups()[0]
+			# Exception raised in one of the cached executions
+			if exec_info := self._get_exec_info(filename):
 
-				# But we didn't cache it
-				if code_hash not in self.session.cache:
-					continue
-
-				# Get the execution info from the session
-				exec_info = self.session.cache[code_hash]
-
-				# Error originating from the user given code
+				# Exception originating from the current execution code
 				if name == exec_info.code:
 					name = "<module>"
 
@@ -275,7 +302,7 @@ class AEvaluator:
 			pointer: str = pointers.pop((filename, lineno, name), "") # type: ignore
 
 			# Recreate current frame with new info
-			patched_frames.append(_PatchedFrame(filename, lineno, name)) # type: ignore
+			patched_frames.append(PatchedFrame(filename, lineno, name)) # type: ignore
 
 			# Adjust frame info if possible
 			if line:
@@ -283,11 +310,18 @@ class AEvaluator:
 			if pointer:
 				patched_frames[-1].pointer = pointer
 
-		# Pop the last frame for proper SyntaxError handling
-		if patched_frames and exc_type == SyntaxError:
-			patched_frames.pop()
-
 		return patched_frames
+
+	def _get_exec_info(
+		self,
+		filename: str
+	) -> typing.Union[ExecutionInfo, None]:
+
+		if search := filename_pattern.search(filename):
+			code_hash: str = search.groups()[0]
+			exec_info = self.session.cache.get(code_hash)
+
+		return exec_info
 
 	def _patch_exc_info(
 		self,
@@ -303,7 +337,7 @@ class AEvaluator:
 			additional formatting may be applied for the syntax errors.
 		"""
 
-		exc_info = "".join(traceback.format_exception_only(exc_value))
+		exc_info = "".join(traceback.format_exception_only(exc_type, exc_value))
 
 		if exc_type == SyntaxError:
 			if search := filename_pattern.search(exc_info):
@@ -313,14 +347,3 @@ class AEvaluator:
 					exc_info = exc_info.replace(f'<code {code_hash}>', "<code>")
 
 		return exc_info
-
-	def patch_tb(
-		self,
-		exc_type: type[BaseException],
-		exc_value: BaseException,
-		tb: TracebackType = None, # type: ignore
-	):
-		frames = self._patch_frames(exc_type, tb)
-		exc_info = self._patch_exc_info(exc_type, exc_value)
-
-		return frames, exc_info
