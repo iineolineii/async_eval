@@ -328,13 +328,25 @@ class PatchedFrame:
 	line: str = field(default="", init=False)
 	pointer: str = field(default="", init=False)
 
-	def __str__(self) -> str: # type: ignore
-		frame_info = f'  File "{self.filename}", line {self.lineno}, in <{self.name}>'
+	def __str__(self) -> str:
+		frame_info = f'  File "{self.filename}", line {self.lineno}, in {self.name}'
 
 		if self.line:
 			frame_info += f"\n    {self.line}"
-		if self.line:
+		if self.pointer:
 			frame_info += f"\n{self.pointer}"
+
+		return frame_info
+
+	def __iter__(self):
+		frame_info = [self.filename, self.lineno, self.name]
+
+		if self.line:
+			frame_info.append(self.line)
+		if self.pointer:
+			frame_info.append(self.pointer)
+
+		return iter(frame_info)
 
 @dataclass
 class ExecutionInfo:
@@ -345,7 +357,7 @@ class ExecutionInfo:
 
 @dataclass
 class Session:
-	cache:    dict[str, ExecutionInfo] = field(default_factory=lambda: {})
+	cache:   dict[str, ExecutionInfo] = field(default_factory=lambda: {})
 	globals: dict[str, typing.Any] = field(default_factory=lambda: {})
 	locals:  dict[str, typing.Any] = field(default_factory=lambda: {})
 
