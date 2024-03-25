@@ -274,9 +274,9 @@ class AEvaluator:
 		patched_frames: list[PatchedFrame] = []
 		for frame in frames:
 			filename: str = frame.filename
-			lineno: int | None = frame.lineno
+			lineno: typing.Optional[int] = frame.lineno
 			name: str = frame.name
-			line: str | None = frame.line
+			line: typing.Optional[str] = frame.line
 
 			# Skip unnecessary frames
 			if (filename, name) in self.hidden_frames:

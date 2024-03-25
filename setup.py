@@ -4,6 +4,6 @@ setup(
     name="async_eval",
     version="2.1.0",
     packages=find_packages(),
-	python_requires=">=3.12",
+	python_requires=">=3.9",
 	install_requires=[]
 )
