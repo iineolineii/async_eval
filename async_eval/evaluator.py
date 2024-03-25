@@ -60,6 +60,10 @@ class AEvaluator:
 		glb = glb.copy() or {}
 		additional_vars = additional_vars.copy()
 
+		# Store current code in the session
+		self.code_hash = str(uuid4())
+		filename = f"<code {self.code_hash}>"
+
 		# Use variables from past executions
 		# and pre-save current ones in the session
 		if not isolate:
@@ -69,10 +73,6 @@ class AEvaluator:
 			# Save execution info
 			exec_info = ExecutionInfo(code, glb, additional_vars)
 			self.session.cache[self.code_hash] = exec_info
-
-		# Store current code in the session
-		self.code_hash = str(uuid4())
-		filename = f"<code {self.code_hash}>"
 
 		# Setup excepthook for executing the code
 		# and bring back the old one after this
@@ -320,7 +320,7 @@ class AEvaluator:
 			code_hash: str = search.groups()[0]
 			exec_info = self.session.cache.get(code_hash)
 
-		return exec_info
+			return exec_info
 
 	def _patch_exc_info(
 		self,
