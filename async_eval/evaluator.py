@@ -67,8 +67,8 @@ class AEvaluator:
 		# Use variables from past executions
 		# and pre-save current ones in the session
 		if not isolate:
-			glb.update(self.session.globals)
-			additional_vars.update(self.session.locals)
+			glb = self.session.globals | glb
+			additional_vars = self.session.locals | additional_vars
 
 			# Save execution info
 			exec_info = ExecutionInfo(code, glb, additional_vars)
