@@ -6,27 +6,27 @@ Evaluator = AEvaluator
 
 
 async def aeval(
-	code: str,
-	glb: dict[str, typing.Any] = {},
-	**additional_vars: typing.Any
+    code: str,
+    glb: dict[str, typing.Any] = {},
+    **additional_vars: typing.Any
 ) -> typing.Any:
-	"""Evaluate code in asynchronous mode.
+    """Evaluate code in asynchronous mode.
 
-	Args:
-		code (`str`):\
-			The code to be evaluated.
+    Args:
+    	code (`str`):\
+    		The code to be evaluated.
 
-		glb (`dict[str, Any]`, *optional*):\
-			A dictionary of global variables to be set on the execution context.\
-			Defaults to an empty dictionary.
+    	glb (`dict[str, Any]`, *optional*):\
+    		A dictionary of global variables to be set on the execution context.\
+    		Defaults to an empty dictionary.
 
-		additional_vars (`Any`, *optional*):\
-			Additional variables to be set on the execution context.\
-			Considered as locals.
+    	additional_vars (`Any`, *optional*):\
+    		Additional variables to be set on the execution context.\
+    		Considered as locals.
 
-	Returns:
-		Result of code evaluation or `typing.NoReturn` if the result is empty.
-	"""
-	return await AEvaluator().aeval(code, glb, isolate=True, **additional_vars)
+    Returns:
+    	Result of code evaluation or `typing.NoReturn` if the result is empty.
+    """
+    return await AEvaluator().aeval(code, glb, isolate=True, **additional_vars)
 
 eval = aeval
