@@ -1,13 +1,26 @@
 import ast
+import re
+import sys
 from copy import copy
 from dataclasses import dataclass, field
-import re
-from typing import Iterable
-import typing
-
+from typing import Any, Iterable, NoReturn, TypeVar, Union, final
 
 uuid4match = r"[a-f0-9]{8}-?[a-f0-9]{4}-?4[a-f0-9]{3}-?[89ab][a-f0-9]{3}-?[a-f0-9]{12}"
 filename_pattern = re.compile(rf"\<code ({uuid4match})\>")
+
+AST = TypeVar("AST", bound=ast.AST)
+stmt = TypeVar("stmt", bound=ast.stmt)
+expr = TypeVar("expr", bound=ast.expr)
+
+AstTry = (ast.Try, )
+Try = TypeVar("Try", bound=ast.Try)
+
+if sys.version_info >= (3, 11):
+    AstTry += (ast.TryStar, )
+    Try = TypeVar("Try", bound=Union[ast.Try, ast.TryStar])
+
+For = TypeVar("For", bound=Union[ast.For, ast.AsyncFor])
+With = TypeVar("With", bound=Union[ast.With, ast.AsyncWith])
 
 def uniquify_name(name: str, namespace: Iterable[str]) -> str:
     """Generate completely unique name based on the old name
@@ -42,12 +55,6 @@ def extract_pointers(traceback_text: str) -> dict[tuple[str, int, str], str]:
     return pointers
 
 class NodeTransformer:
-    def __init__(
-        self,
-        typing_name: str = "typing"
-    ) -> None:
-        self.typing_name = typing_name
-
     def transform_module(
         self,
         module: ast.Module
@@ -67,7 +74,7 @@ class NodeTransformer:
 
         return module
 
-    def patch_returns[AST: ast.AST](
+    def patch_returns(
         self,
         node: AST
     ) -> AST:
@@ -93,13 +100,13 @@ class NodeTransformer:
 
         return node
 
-    def patch_statement[stmt: ast.stmt](
+    def patch_statement(
         self,
         node: stmt
-    ) -> stmt | ast.Return:
+    ) -> Union[stmt, ast.Return]:
 
         old_node = node
-        node.end_lineno = self.get_end_lineno(node)
+        node.end_lineno = getattr(node, "end_lineno", node.lineno)
 
         if isinstance(node, ast.If):
             node = self.handle_If(node)
@@ -119,14 +126,15 @@ class NodeTransformer:
         elif isinstance(node, ast.Expr):
             node = self.handle_Expr(node)
 
-        elif isinstance(node, (ast.Try, ast.TryStar)):
+        elif isinstance(node, AstTry):
             node = self.handle_Try(node)
 
-        elif isinstance(node, ast.Match):
-            node = self.handle_Match(node)
+        elif sys.version_info >= (3, 10):
+            if isinstance(node, ast.Match):
+                node = self.handle_Match(node)
 
-        elif isinstance(node, ast.TypeAlias):
-            node = self.handle_TypeAlias(node)
+            elif sys.version_info >= (3, 12) and isinstance(node, ast.TypeAlias):
+                node = self.handle_TypeAlias(node)
 
         node = ast.copy_location(node, old_node)
         return node
@@ -141,14 +149,14 @@ class NodeTransformer:
 
         # NOTE: In theory, this can only happen with for's target node, but who knows...
         if hasattr(value, "ctx") and not isinstance(getattr(node.value, "ctx"), ast.Load):
-            # Multi-target loop
+            # Node is a multi-target for loop
             if isinstance(value, ast.Tuple):
                 value.elts = [self.change_ctx(elt) for elt in value.elts]
 
             setattr(value, "ctx", ast.Load())
 
-        glb = ast.copy_location(ast.Call(func=ast.Name(id = "globals", ctx = ast.Load()), args=[], keywords=[]), node)
-        loc = ast.copy_location(ast.Call(func=ast.Name(id = "locals", ctx = ast.Load()), args=[], keywords=[]), node)
+        glb = ast.copy_location(self.parse_expr("globals()"), node)
+        loc = ast.copy_location(self.parse_expr( "locals()"), node)
 
         value = ast.Tuple(elts=[value, glb, loc], ctx=ast.Load())
         value = ast.copy_location(value, node)
@@ -169,7 +177,7 @@ class NodeTransformer:
 
         return node
 
-    def handle_For[For: ast.For | ast.AsyncFor](
+    def handle_For(
         self,
         node: For
     ) -> For:
@@ -200,7 +208,7 @@ class NodeTransformer:
 
         return self.handle_Return(ast.Return(value=value))
 
-    def handle_With[With: ast.With | ast.AsyncWith](
+    def handle_With(
         self,
         node: With
     ) -> With:
@@ -232,7 +240,7 @@ class NodeTransformer:
 
         return self.handle_Assign(ast.Assign(targets=targets, value=value))
 
-    def handle_Try[Try: ast.Try | ast.TryStar](
+    def handle_Try(
         self,
         node: Try
     ) -> Try:
@@ -251,67 +259,55 @@ class NodeTransformer:
 
         return node
 
-    def handle_Match(
-        self,
-        node: ast.Match
-    ) -> ast.Match:
-        for case in node.cases:
-            case.body[-1] = self.patch_statement(case.body[-1])
+    if sys.version_info >= (3, 10):
+        def handle_Match(
+            self,
+            node: ast.Match
+        ) -> ast.Match:
+            for case in node.cases:
+                case.body[-1] = self.patch_statement(case.body[-1])
 
-        return node
+            return node
 
-    def handle_TypeAlias(
-        self,
-        node: ast.TypeAlias
-    ) -> ast.Return:
+        if sys.version_info >= (3, 12):
+            def handle_TypeAlias(
+                self,
+                node: ast.TypeAlias
+            ) -> ast.Return:
 
-        value = ast.NamedExpr(
-            target=node.name,
-            value=ast.Call(
-                func=ast.Attribute(
-                    value=ast.Name(id=self.typing_name, ctx=ast.Load()),
-                    attr='TypeAliasType',
-                    ctx=ast.Load()
-                ),
-                args=[
-                    ast.Constant(value=node.name.id),
-                    node.value
-                ],
-                keywords=[
-                    ast.keyword(
-                        arg='type_params',
-                        value=ast.Tuple(
-                            elts=[self.assign_type_param(param) for param in node.type_params],
-                            ctx=ast.Load()
-                        )
+                value = ast.NamedExpr(
+                    target=node.name,
+                    value=ast.Call(
+                        func=self.parse_expr('__import__("typing").TypeAliasType'),
+                        args=[
+                            ast.Constant(value=node.name.id),
+                            node.value
+                        ],
+                        keywords=[
+                            ast.keyword(
+                                arg='type_params',
+                                value=ast.Tuple(
+                                    elts=[self.assign_type_param(param) for param in node.type_params],
+                                    ctx=ast.Load()
+                                )
+                            )
+                        ]
                     )
-                ]
-            )
-        )
+                )
 
-        return self.handle_Return(ast.Return(value=value))
+                return self.handle_Return(ast.Return(value=value))
 
 
-    def assign_type_param(
-        self,
-        param: ast.type_param
-    ):
-        return ast.NamedExpr(
-            target=ast.Name(id=param.name, ctx=ast.Store()), # type: ignore
-            value=param
-        )
+            def assign_type_param(
+                self,
+                param: ast.type_param
+            ):
+                return ast.NamedExpr(
+                    target=ast.Name(id=param.name, ctx=ast.Store()), # type: ignore
+                    value=param
+                )
 
-    def get_end_lineno(
-        self,
-        node: ast.AST
-    ) -> int:
-        if not hasattr(node, "end_lineno"):
-            end_lineno: int = getattr(node, "end_lineno", node.lineno)
-            return end_lineno
-
-        return node.end_lineno # type: ignore
-
-    def change_ctx[expr: ast.expr](
+    def change_ctx(
         self,
         node: expr
     ) -> expr:
@@ -319,6 +315,19 @@ class NodeTransformer:
         setattr(node, "ctx", ast.Load())
         return node
 
+    def parse_expr(
+        self,
+        source: str
+    ):
+        node = ast.parse(source).body[0]
+        if not isinstance(node, ast.Expr):
+            raise TypeError("Given source does not evaluate a valid expression")
+        return node.value
+
+@final
+class EmptyResult:
+    def __init_subclass__(cls) -> NoReturn:
+        raise TypeError(f"Cannot subclass {EmptyResult!r}")
 
 @dataclass
 class PatchedFrame:
@@ -351,22 +360,22 @@ class PatchedFrame:
 @dataclass
 class ExecutionInfo:
     code:    str
-    globals: dict[str, typing.Any] = field(default_factory=lambda: {})
-    locals:  dict[str, typing.Any] = field(default_factory=lambda: {})
+    globals: dict[str, Any] = field(default_factory=lambda: {})
+    locals:  dict[str, Any] = field(default_factory=lambda: {})
     function_name: str = field(init=False)
 
 @dataclass
 class Session:
     cache:   dict[str, ExecutionInfo] = field(default_factory=lambda: {})
-    globals: dict[str, typing.Any] = field(default_factory=lambda: {})
-    locals:  dict[str, typing.Any] = field(default_factory=lambda: {})
+    globals: dict[str, Any] = field(default_factory=lambda: {})
+    locals:  dict[str, Any] = field(default_factory=lambda: {})
 
     @property
-    def variables(self) -> dict[str, typing.Any]:
+    def variables(self) -> dict[str, Any]:
         return self.globals | self.locals
 
     @variables.setter
-    def variables(self, value: tuple[dict[str, typing.Any], dict[str, typing.Any]]):
+    def variables(self, value: tuple[dict[str, Any], dict[str, Any]]):
         globals, locals = value
         self.globals.update(globals)
         self.locals.update(locals)
