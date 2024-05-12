@@ -1,10 +1,8 @@
 import ast
+import re
 from copy import copy
 from dataclasses import dataclass, field
-import re
-from typing import Iterable
-import typing
-
+from typing import Any, Iterable, NoReturn, final
 
 uuid4match = r"[a-f0-9]{8}-?[a-f0-9]{4}-?4[a-f0-9]{3}-?[89ab][a-f0-9]{3}-?[a-f0-9]{12}"
 filename_pattern = re.compile(rf"\<code ({uuid4match})\>")
@@ -42,12 +40,6 @@ def extract_pointers(traceback_text: str) -> dict[tuple[str, int, str], str]:
     return pointers
 
 class NodeTransformer:
-    def __init__(
-        self,
-        typing_name: str = "typing"
-    ) -> None:
-        self.typing_name = typing_name
-
     def transform_module(
         self,
         module: ast.Module
@@ -99,7 +91,7 @@ class NodeTransformer:
     ) -> stmt | ast.Return:
 
         old_node = node
-        node.end_lineno = self.get_end_lineno(node)
+        node.end_lineno = getattr(node, "end_lineno", node.lineno)
 
         if isinstance(node, ast.If):
             node = self.handle_If(node)
@@ -147,8 +139,8 @@ class NodeTransformer:
 
             setattr(value, "ctx", ast.Load())
 
-        glb = ast.copy_location(ast.Call(func=ast.Name(id = "globals", ctx = ast.Load()), args=[], keywords=[]), node)
-        loc = ast.copy_location(ast.Call(func=ast.Name(id = "locals", ctx = ast.Load()), args=[], keywords=[]), node)
+        glb = ast.copy_location(self.parse_expr("globals()"), node)
+        loc = ast.copy_location(self.parse_expr( "locals()"), node)
 
         value = ast.Tuple(elts=[value, glb, loc], ctx=ast.Load())
         value = ast.copy_location(value, node)
@@ -268,11 +260,7 @@ class NodeTransformer:
         value = ast.NamedExpr(
             target=node.name,
             value=ast.Call(
-                func=ast.Attribute(
-                    value=ast.Name(id=self.typing_name, ctx=ast.Load()),
-                    attr='TypeAliasType',
-                    ctx=ast.Load()
-                ),
+                func=self.parse_expr('__import__("typing").TypeAliasType'),
                 args=[
                     ast.Constant(value=node.name.id),
                     node.value
@@ -301,16 +289,6 @@ class NodeTransformer:
             value=param
         )
 
-    def get_end_lineno(
-        self,
-        node: ast.AST
-    ) -> int:
-        if not hasattr(node, "end_lineno"):
-            end_lineno: int = getattr(node, "end_lineno", node.lineno)
-            return end_lineno
-
-        return node.end_lineno # type: ignore
-
     def change_ctx[expr: ast.expr](
         self,
         node: expr
@@ -319,6 +297,19 @@ class NodeTransformer:
         setattr(node, "ctx", ast.Load())
         return node
 
+    def parse_expr(
+        self,
+        source: str
+    ):
+        node = ast.parse(source).body[0]
+        if not isinstance(node, ast.Expr):
+            raise TypeError("Given source does not evaluate a valid expression")
+        return node.value
+
+@final
+class EmptyResult:
+    def __init_subclass__(cls) -> NoReturn:
+        raise TypeError(f"Cannot subclass {EmptyResult!r}")
 
 @dataclass
 class PatchedFrame:
@@ -351,22 +342,22 @@ class PatchedFrame:
 @dataclass
 class ExecutionInfo:
     code:    str
-    globals: dict[str, typing.Any] = field(default_factory=lambda: {})
-    locals:  dict[str, typing.Any] = field(default_factory=lambda: {})
+    globals: dict[str, Any] = field(default_factory=lambda: {})
+    locals:  dict[str, Any] = field(default_factory=lambda: {})
     function_name: str = field(init=False)
 
 @dataclass
 class Session:
     cache:   dict[str, ExecutionInfo] = field(default_factory=lambda: {})
-    globals: dict[str, typing.Any] = field(default_factory=lambda: {})
-    locals:  dict[str, typing.Any] = field(default_factory=lambda: {})
+    globals: dict[str, Any] = field(default_factory=lambda: {})
+    locals:  dict[str, Any] = field(default_factory=lambda: {})
 
     @property
-    def variables(self) -> dict[str, typing.Any]:
+    def variables(self) -> dict[str, Any]:
         return self.globals | self.locals
 
     @variables.setter
-    def variables(self, value: tuple[dict[str, typing.Any], dict[str, typing.Any]]):
+    def variables(self, value: tuple[dict[str, Any], dict[str, Any]]):
         globals, locals = value
         self.globals.update(globals)
         self.locals.update(locals)

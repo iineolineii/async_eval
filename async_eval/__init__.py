@@ -1,15 +1,16 @@
-import typing
-from .evaluator import AEvaluator
+from typing import Any
 
+from .evaluator import AEvaluator
+from .utils import EmptyResult
 
 Evaluator = AEvaluator
 
 
 async def aeval(
     code: str,
-    glb: dict[str, typing.Any] = {},
-    **additional_vars: typing.Any
-) -> typing.Any:
+    glb: dict[str, Any] = {},
+    **additional_vars: Any
+) -> EmptyResult | Any:
     """Evaluate code in asynchronous mode.
 
     Args:
@@ -25,7 +26,7 @@ async def aeval(
     		Considered as locals.
 
     Returns:
-    	Result of code evaluation or `typing.NoReturn` if the result is empty.
+    	Result of code evaluation or `~utils.EmptyResult` if the result is empty.
     """
     return await AEvaluator().aeval(code, glb, isolate=True, **additional_vars)
 

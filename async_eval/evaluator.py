@@ -1,21 +1,20 @@
 import ast
 import sys
 import traceback
-import typing
 from types import TracebackType
+from typing import Any, Iterable, Optional
 from uuid import uuid4
 
 from .utils import (
+    EmptyResult,
     ExecutionInfo,
     NodeTransformer,
-    Session,
     PatchedFrame,
+    Session,
     extract_pointers,
     filename_pattern,
-    uniquify_name,
+    uniquify_name
 )
-
-from typing import Any, Iterable, NoReturn, overload
 
 
 class AEvaluator:
@@ -41,7 +40,7 @@ class AEvaluator:
         glb: dict[str, Any] = {},
         isolate: bool = False,
         **additional_vars: Any,
-    ) -> Any:
+    ) -> EmptyResult | Any:
         """Evaluate code in asynchronous mode.
 
         Args:
@@ -64,7 +63,7 @@ class AEvaluator:
                 Considered as locals.
 
         Returns:
-            Result of code evaluation or `NoReturn` if the result is empty.
+            Result of code evaluation or `~utils.EmptyResult` if the result is empty.
         """
 
         # Make shallow copies of variable scopes
@@ -98,7 +97,7 @@ class AEvaluator:
             exec_info.globals, exec_info.locals = variables
 
         # Return proper result
-        return result if not self.empty_result else NoReturn
+        return result if not self.empty_result else EmptyResult()
 
     async def _evaluate(
         self,
@@ -108,11 +107,6 @@ class AEvaluator:
         _locals: dict[str, Any],
     ) -> tuple[Any, tuple[dict[str, Any], dict[str, Any]]]:
         code = code.strip()
-
-        # Make sure that typing is not overridden anywhere in the locals
-        typing_name = uniquify_name(self.node_transformer.typing_name, _locals)
-        _locals[typing_name] = typing
-        self.node_transformer.typing_name = typing_name
 
         # Make sure that main function name is not overridden anywhere in the globals
         self.function_name = uniquify_name("amain", _globals)
@@ -202,9 +196,9 @@ class AEvaluator:
 
     def format_tb(
         self,
-        exc_type: type[BaseException] | None,
-        exc_value: BaseException | None,
-        tb: TracebackType | None = None,
+        exc_type: Optional[type[BaseException]],
+        exc_value: Optional[BaseException],
+        tb: Optional[TracebackType] = None,
     ) -> str:
         """
         Formats the current exception traceback from the `sys.exc_info()` into a user-friendly string.
@@ -221,9 +215,9 @@ class AEvaluator:
 
     def patch_tb(
         self,
-        exc_type: type[BaseException] | None,
-        exc_value: BaseException | None,
-        tb: TracebackType | None = None,
+        exc_type: Optional[type[BaseException]],
+        exc_value: Optional[BaseException],
+        tb: Optional[TracebackType] = None,
     ) -> tuple[list[PatchedFrame], str]:
         """
         Processes a `sys.exc_info()` traceback info for customized formatting.
@@ -261,7 +255,7 @@ class AEvaluator:
 
     def _patch_frames(
         self,
-        tb: TracebackType | None = None,
+        tb: Optional[TracebackType] = None,
     ) -> list[PatchedFrame]:
         """
         Filters and patches a traceback object (`tb`) for formatting purposes.
@@ -293,9 +287,9 @@ class AEvaluator:
         patched_frames: list[PatchedFrame] = []
         for frame in frames:
             filename: str = frame.filename
-            lineno: int | None = frame.lineno
+            lineno: Optional[int] = frame.lineno
             name: str = frame.name
-            line: str | None = frame.line
+            line: Optional[str] = frame.line
 
             # Skip unnecessary frames
             if (filename, name) in self.hidden_frames:
@@ -330,7 +324,7 @@ class AEvaluator:
 
         return patched_frames
 
-    def _get_exec_info(self, filename: str) -> ExecutionInfo | None:
+    def _get_exec_info(self, filename: str) -> Optional[ExecutionInfo]:
 
         if search := filename_pattern.search(filename):
             code_hash: str = search.groups()[0]
@@ -339,7 +333,7 @@ class AEvaluator:
             return exec_info
 
     def _patch_exc_info(
-        self, exc_type: type[BaseException] | None, exc_value: BaseException | None
+        self, exc_type: Optional[type[BaseException]], exc_value: Optional[BaseException]
     ) -> str:
         """
         Format exception info according to the exception type.
