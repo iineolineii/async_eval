@@ -2,6 +2,7 @@ import ast
 import re
 from copy import copy
 from dataclasses import dataclass, field
+from types import TracebackType
 from typing import Any, Iterable, NoReturn, final
 
 uuid4match = r"[a-f0-9]{8}-?[a-f0-9]{4}-?4[a-f0-9]{3}-?[89ab][a-f0-9]{3}-?[a-f0-9]{12}"
@@ -339,12 +340,27 @@ class PatchedFrame:
 
         return iter(frame_info)
 
-@dataclass
 class ExecutionInfo:
-    code:    str
-    globals: dict[str, Any] = field(default_factory=lambda: {})
-    locals:  dict[str, Any] = field(default_factory=lambda: {})
-    function_name: str = field(init=False)
+    code: str
+    globals: dict[str, Any]
+    locals: dict[str, Any]
+    function_name: str
+    result: Any
+    exc_info: tuple[type[BaseException], BaseException, TracebackType]
+    empty_result: bool = False
+
+    def __init__(
+        self,
+        code: str,
+        globals: dict[str, Any] = {},
+        locals: dict[str, Any] = {},
+    ) -> None:
+        if not hasattr(self, "code"):
+            self.code = code
+        if not hasattr(self, "globals"):
+            self.globals = globals
+        if not hasattr(self, "locals"):
+            self.locals = locals
 
 @dataclass
 class Session:
