@@ -34,6 +34,14 @@ class AEvaluator:
     def variables(self) -> dict[str, Any]:
         return self.session.variables
 
+    @property
+    def empty_result(self) -> bool:
+        return self.last_execution.empty_result
+
+    @empty_result.setter
+    def empty_result(self, value: bool):
+        self.last_execution.empty_result = value
+
     async def aeval(
         self,
         code: str,
@@ -81,8 +89,8 @@ class AEvaluator:
             additional_vars = self.session.locals | additional_vars
 
             # Save execution info
-            exec_info = ExecutionInfo(code, glb, additional_vars)
-            self.session.cache[self.code_hash] = exec_info
+            self.last_execution = ExecutionInfo(code, glb, additional_vars)
+            self.session.cache[self.code_hash] = self.last_execution
 
         # Setup excepthook for executing the code
         # and bring back the old one after this
@@ -94,7 +102,7 @@ class AEvaluator:
         # Update variables if needed
         if not isolate:
             self.session.variables = variables
-            exec_info.globals, exec_info.locals = variables
+            self.last_execution.globals, self.last_execution.locals = variables
 
         # Return proper result
         return result if not self.empty_result else EmptyResult()
@@ -105,7 +113,7 @@ class AEvaluator:
         filename: str,
         _globals: dict[str, Any],
         _locals: dict[str, Any],
-    ) -> tuple[Any, tuple[dict[str, Any], dict[str, Any]]]:
+    ) -> tuple[Any | None, tuple[dict[str, Any], dict[str, Any]]]:
         code = code.strip()
 
         # Make sure that main function name is not overridden anywhere in the globals
@@ -175,16 +183,19 @@ class AEvaluator:
         exec(compiled, _globals)
 
         # Execute main code function and get the result
-        result = await _globals[self.function_name](**_locals)
+        result_metadata: (
+            tuple[Any, dict[str, Any], dict[str, Any]] |
+            tuple[dict[str, Any], dict[str, Any]]
+        ) = await _globals[self.function_name](**_locals)
 
-        # There's no value for result
-        if len(result) == 2:
+        # There's no value for the actual evaluation result
+        if len(result_metadata) == 2:
             self.empty_result = True
-            glb, loc = result
-            result = [None, glb, loc]
+            glb, loc = result_metadata
+            result_metadata = (None, glb, loc)
 
-        result, *variables = result
-        return result, variables  # type: ignore
+        result, glb, loc = result_metadata
+        return result, (glb, loc)
 
     def _exc_handler(
         self,
@@ -192,6 +203,7 @@ class AEvaluator:
         exc_value: BaseException,
         tb: TracebackType = None,  # type: ignore
     ):
+        self.last_execution.exc_info = (exc_type, exc_value, tb)
         print(self.format_tb(exc_type, exc_value, tb))
 
     def format_tb(
@@ -344,7 +356,7 @@ class AEvaluator:
             additional formatting may be applied for the syntax errors.
         """
 
-        exc_info = "".join(traceback.format_exception_only(exc_type, exc_value))
+        exc_info = "".join(traceback.format_exception_only(exc_value))
 
         if exc_type == SyntaxError:
             if search := filename_pattern.search(exc_info):
