@@ -1,7 +1,7 @@
 from typing import Any
 
 from .evaluator import AEvaluator
-from .utils import EmptyResult
+from .types import EmptyResult
 
 Evaluator = AEvaluator
 

@@ -164,8 +164,4 @@ cython_debug/
 
 # vscode
 .vscode/
-
-async_eval/old
-/async_eval/test
-/async_eval/__main__.py
-/test
+**test**
