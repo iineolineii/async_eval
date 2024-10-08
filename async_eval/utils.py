@@ -1,397 +1,149 @@
 import ast
+import builtins
 import re
 import sys
-from copy import copy
-from dataclasses import dataclass, field
+from contextlib import contextmanager
+from copy import deepcopy
 from types import TracebackType
-from typing import Any, Iterable, NoReturn, TypeVar, Union, final
+from typing import Any, Callable, ContextManager, Optional, Union
+
 
 uuid4match = r"[a-f0-9]{8}-?[a-f0-9]{4}-?4[a-f0-9]{3}-?[89ab][a-f0-9]{3}-?[a-f0-9]{12}"
-filename_pattern = re.compile(rf"\<code ({uuid4match})\>")
+filename_pattern = re.compile(rf"\<aeval \d+? ({uuid4match})\>")
 
-AST = TypeVar("AST", bound=ast.AST)
-stmt = TypeVar("stmt", bound=ast.stmt)
-expr = TypeVar("expr", bound=ast.expr)
 
-AstTry = (ast.Try, )
-Try = TypeVar("Try", bound=ast.Try)
-
-if sys.version_info >= (3, 11):
-    AstTry += (ast.TryStar, )
-    Try = TypeVar("Try", bound=Union[ast.Try, ast.TryStar])
-
-For = TypeVar("For", bound=Union[ast.For, ast.AsyncFor])
-With = TypeVar("With", bound=Union[ast.With, ast.AsyncWith])
-
-def uniquify_name(name: str, namespace: Iterable[str]) -> str:
-    """Generate completely unique name based on the old name
-
-    Args:
-        name (str): The old name that needs to be changed
-        namespace (Iterable[str]): Names that need to be checked for uniqueness
-
-    Returns:
-        str: The new unique name
-
-    Examples:
-        >>> uniquify_name("foo", {"foo", "bar", "baz"})
-        '_foo'
-        >>> uniquify_name("bar", {"foo", "bar", "baz"})
-        '_bar'
+@contextmanager
+def custom_excepthook(
+    handler: Callable[[type[BaseException], BaseException, TracebackType], Any]
+):
     """
-    while name in namespace:
-        name = "_" + name
+    Context manager that allows temporary replace
+    sys.excepthook with the given `handler` function.
+    """
+    original_excepthook = sys.excepthook
 
-    return name
+    def wrapper(*args):
+        try:
+            handler(*args)
+        finally:
+            sys.excepthook = original_excepthook
+
+    sys.excepthook = wrapper
+    yield
+
+class CustomBuiltins(ContextManager):
+    def __init__(self, extensions: Optional[dict[str, Any]] = None, replace: bool = False):
+        """
+        Context manager that allows temporary
+        extend or replace (not safe!) builtin variable scope
+        with the given `extensions` dictionary.
+        """
+        if extensions is None:
+            extensions = {}
+        self.extensions = extensions or {}
+        self.orig_builtins: dict[str, Any] = {}
+        self.replace = replace
+
+    def __enter__(self):
+        # Save the original builtins
+        self.orig_builtins = deepcopy(builtins.__dict__)
+
+        # Replace builtins with the provided extensions
+        if self.replace:
+            builtins.__dict__.clear()
+        builtins.__dict__.update(self.extensions)
+
+        return builtins
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        # Restore the original builtins
+        builtins.__dict__.clear()
+        builtins.__dict__.update(self.orig_builtins)
+
+        # Propagate any exceptions
+        return False
+
+custom_builtins = CustomBuiltins
+
+
+def reconstruct_node(
+    node: ast.AST,
+    excluded_names_pattern: Union[str, re.Pattern, None] = r"^(?:parent|lineno|end_lineno|col_offset|end_col_offset)$",
+    indentsize: int = 4,
+    show_full_names: bool = True,
+    show_None_attrs: bool = False,
+    *,
+    depth: int = 1
+) -> str:
+    indent = depth * (indentsize * " ")
+    result = []
+
+    for name, attr in vars(node).items():
+        if (
+            excluded_names_pattern and re.search(excluded_names_pattern, name)
+            or name == "parent" # Prevent child-parent recursion
+        ):
+            continue
+
+        if isinstance(attr, list) and attr:
+            attr = [reconstruct_node(subnode, excluded_names_pattern, depth=depth+2) for subnode in attr]
+            attr = f",\n".join(attr)
+            attr = f"[\n{attr}\n{indent}]"
+
+        elif isinstance(attr, ast.AST):
+            attr = reconstruct_node(attr, excluded_names_pattern, depth=depth+1)
+
+        elif isinstance(attr, str):
+            attr = repr(attr)
+
+        if show_None_attrs or attr is not None:
+            result.append(f"{name}={str(attr).lstrip()}")
+
+    result = f",\n{indent}".join(result)
+
+    if result:
+        result = f"\n{indent}{result}\n{(depth-1) * (indentsize * ' ')}"
+
+    if not show_full_names:
+        cls_name = type(node).__name__
+    elif hasattr(type(node), "__module__"):
+        cls_name = ".".join([type(node).__module__, type(node).__qualname__])
+    else:
+        cls_name = type(node).__qualname__
+
+    result = f"{(depth-1) * '    '}{cls_name}({result})"
+    return result
+
+def dump_node(
+    node: ast.AST,
+    exclude_pattern: Union[re.Pattern, str] = "parent"
+):
+    return {
+        "_": ".".join([type(node).__module__, type(node).__qualname__])
+        if hasattr(type(node), "__module__") else type(node).__qualname__,
+    **{
+            name: (
+                dump_node(attr) if isinstance(attr, ast.AST)
+                else [
+                    dump_node(subnode)
+                    for subnode in attr
+                ] if isinstance(attr, list)
+                else attr
+            )
+            for name, attr in getattr(node, "__dict__", {}).items()
+            if (
+                not re.search(exclude_pattern, name)
+                or name != "parent" # Prevent child-parent recursion
+            )
+        }
+    }
+
 
 def extract_pointers(traceback_text: str) -> dict[tuple[str, int, str], str]:
     pattern = r'  File "(.*?)", line (\d+), in (.*?)\n    .*?\n(    [~^]+)'
     matches: list[str] = re.findall(pattern, traceback_text)
 
-    pointers = {
+    return {
         (filename, int(lineno), name): pointer
         for filename, lineno, name, pointer in matches
     }
-
-    return pointers
-
-class NodeTransformer:
-    def transform_module(
-        self,
-        module: ast.Module
-    ) -> ast.Module:
-
-        module = self.patch_returns(module) # Patch all returns outside of any function def
-        module.body[-1] = self.patch_statement(module.body[-1])
-
-        #region: Empty result
-        glb = ast.copy_location(ast.Call(func=ast.Name(id = "globals", ctx = ast.Load()), args=[], keywords=[]), old_node=module.body[-1])
-        loc = ast.copy_location(ast.Call(func=ast.Name(id = "locals", ctx = ast.Load()), args=[], keywords=[]), old_node=module.body[-1])
-
-        patched = ast.Return(value=ast.Tuple(elts=[glb, loc], ctx=ast.Load()))
-        patched = ast.copy_location(patched, module.body[-1])
-        module.body.append(patched)
-        #endregion
-
-        return module
-
-    def patch_returns(
-        self,
-        node: AST
-    ) -> AST:
-
-        if isinstance(node, ast.Return):
-            node = self.handle_Return(node)
-            return node
-
-        for name, values in ast.iter_fields(node):
-
-            if isinstance(values, list):
-                values = [
-                    self.patch_returns(value)
-                    if not isinstance(value, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    else value
-                    for value in values
-                ]
-
-            elif isinstance(values, ast.AST):
-                values = self.patch_returns(values)
-
-            setattr(node, name, values)
-
-        return node
-
-    def patch_statement(
-        self,
-        node: stmt
-    ) -> Union[stmt, ast.Return]:
-
-        old_node = node
-        node.end_lineno = getattr(node, "end_lineno", node.lineno)
-
-        if isinstance(node, ast.If):
-            node = self.handle_If(node)
-
-        elif isinstance(node, (ast.For, ast.AsyncFor)):
-            node = self.handle_For(node)
-
-        elif isinstance(node, ast.Assign):
-            node = self.handle_Assign(node)
-
-        elif isinstance(node, ast.AugAssign):
-            node = self.handle_AugAssign(node)
-
-        elif isinstance(node, (ast.With, ast.AsyncWith)):
-            node = self.handle_With(node)
-
-        elif isinstance(node, ast.Expr):
-            node = self.handle_Expr(node)
-
-        elif isinstance(node, AstTry):
-            node = self.handle_Try(node)
-
-        elif sys.version_info >= (3, 10):
-            if isinstance(node, ast.Match):
-                node = self.handle_Match(node)
-
-            elif sys.version_info >= (3, 12) and isinstance(node, ast.TypeAlias):
-                node = self.handle_TypeAlias(node)
-
-        node = ast.copy_location(node, old_node)
-        return node
-
-
-    def handle_Return(
-        self,
-        node: ast.Return
-    ) -> ast.Return:
-        """Patch a single return. Add globals and locals call to return"s value"""
-        value = copy(node.value)
-
-        # NOTE: In theory, this can only happen with for's target node, but who knows...
-        if hasattr(value, "ctx") and not isinstance(getattr(node.value, "ctx"), ast.Load):
-            # Node is a multi-target for loop
-            if isinstance(value, ast.Tuple):
-                value.elts = [self.change_ctx(elt) for elt in value.elts]
-
-            setattr(value, "ctx", ast.Load())
-
-        glb = ast.copy_location(self.parse_expr("globals()"), node)
-        loc = ast.copy_location(self.parse_expr( "locals()"), node)
-
-        value = ast.Tuple(elts=[value, glb, loc], ctx=ast.Load())
-        value = ast.copy_location(value, node)
-
-        patched = ast.Return(value=value)
-        patched = ast.copy_location(patched, node)
-
-        return patched
-
-    def handle_If(
-        self,
-        node: ast.If
-    ) -> ast.If:
-        node.body[-1] = self.patch_statement(node.body[-1])
-
-        if getattr(node, "orelse", None):
-            node.orelse[-1] = self.patch_statement(node.orelse[-1])
-
-        return node
-
-    def handle_For(
-        self,
-        node: For
-    ) -> For:
-        if getattr(node, "orelse", None):
-            node.orelse[-1] = self.patch_statement(node.orelse[-1])
-
-        else:
-            node.orelse = [self.handle_Return(ast.Return(value=node.target))] # type: ignore
-            node.end_lineno += 1 # type: ignore
-
-        return node
-
-    def handle_Expr(
-        self,
-        node: ast.Expr
-    ) -> ast.Return:
-        return self.handle_Return(ast.Return(value=node.value))
-
-    def handle_Assign(
-        self,
-        node: ast.Assign
-    ) -> ast.Return:
-        if len(node.targets) > 1:
-            value = ast.Tuple(elts=[ast.NamedExpr(target=target, value=node.value) for target in node.targets], ctx=ast.Load())
-
-        else:
-            value = ast.NamedExpr(target=node.targets[0], value=node.value)
-
-        return self.handle_Return(ast.Return(value=value))
-
-    def handle_With(
-        self,
-        node: With
-    ) -> With:
-
-        node.body[-1] = self.patch_statement(node.body[-1])
-        return node
-
-    def handle_AugAssign(
-        self,
-        node: ast.AugAssign
-    ) -> ast.Return:
-
-        targets = [node.target]
-        value = ast.copy_location(node.value, ast.BinOp(
-            left = node.target,
-            op = node.op,
-            right = node.value
-        ))
-
-        return self.handle_Assign(ast.Assign(targets=targets, value=value))
-
-    def handle_AnnAssign(
-        self,
-        node: ast.AnnAssign
-    ) -> ast.Return:
-
-        targets = [node.target]
-        value = node.value
-
-        return self.handle_Assign(ast.Assign(targets=targets, value=value))
-
-    def handle_Try(
-        self,
-        node: Try
-    ) -> Try:
-
-        if getattr(node, "finalbody", None): # If the "try" statement has a "finally" block, this block's body will contain the actual last node
-            node.finalbody[-1] = self.patch_statement(node.finalbody[-1])
-
-        elif getattr(node, "orelse", None): # If there's no "finally", "else" will be the last block
-            node.orelse[-1] = self.patch_statement(node.orelse[-1])
-
-        else: # Otherwise, we are dealing with a regular "try/except" statement
-            node.body[-1] = self.patch_statement(node.body[-1])
-
-            for handler in node.handlers:
-                handler.body[-1] = self.patch_statement(handler.body[-1])
-
-        return node
-
-    if sys.version_info >= (3, 10):
-        def handle_Match(
-            self,
-            node: ast.Match
-        ) -> ast.Match:
-            for case in node.cases:
-                case.body[-1] = self.patch_statement(case.body[-1])
-
-            return node
-
-        if sys.version_info >= (3, 12):
-            def handle_TypeAlias(
-                self,
-                node: ast.TypeAlias
-            ) -> ast.Return:
-
-                value = ast.NamedExpr(
-                    target=node.name,
-                    value=ast.Call(
-                        func=self.parse_expr('__import__("typing").TypeAliasType'),
-                        args=[
-                            ast.Constant(value=node.name.id),
-                            node.value
-                        ],
-                        keywords=[
-                            ast.keyword(
-                                arg='type_params',
-                                value=ast.Tuple(
-                                    elts=[self.assign_type_param(param) for param in node.type_params],
-                                    ctx=ast.Load()
-                                )
-                            )
-                        ]
-                    )
-                )
-
-                return self.handle_Return(ast.Return(value=value))
-
-
-            def assign_type_param(
-                self,
-                param: ast.type_param
-            ):
-                return ast.NamedExpr(
-                    target=ast.Name(id=param.name, ctx=ast.Store()), # type: ignore
-                    value=param
-                )
-
-    def change_ctx(
-        self,
-        node: expr
-    ) -> expr:
-        node = copy(node)
-        setattr(node, "ctx", ast.Load())
-        return node
-
-    def parse_expr(
-        self,
-        source: str
-    ):
-        node = ast.parse(source).body[0]
-        if not isinstance(node, ast.Expr):
-            raise TypeError("Given source does not evaluate a valid expression")
-        return node.value
-
-@final
-class EmptyResult:
-    def __init_subclass__(cls) -> NoReturn:
-        raise TypeError(f"Cannot subclass {EmptyResult!r}")
-
-@dataclass
-class PatchedFrame:
-    filename: str
-    lineno: int
-    name: str
-    line: str = field(default="", init=False)
-    pointer: str = field(default="", init=False)
-
-    def __str__(self) -> str:
-        frame_info = f'  File "{self.filename}", line {self.lineno}, in {self.name}'
-
-        if self.line:
-            frame_info += f"\n    {self.line}"
-        if self.pointer:
-            frame_info += f"\n{self.pointer}"
-
-        return frame_info
-
-    def __iter__(self):
-        frame_info = [self.filename, self.lineno, self.name]
-
-        if self.line:
-            frame_info.append(self.line)
-        if self.pointer:
-            frame_info.append(self.pointer)
-
-        return iter(frame_info)
-
-class ExecutionInfo:
-    code: str
-    globals: dict[str, Any]
-    locals: dict[str, Any]
-    function_name: str
-    result: Any
-    exc_info: tuple[type[BaseException], BaseException, TracebackType]
-    empty_result: bool = False
-
-    def __init__(
-        self,
-        code: str,
-        globals: dict[str, Any] = {},
-        locals: dict[str, Any] = {},
-    ) -> None:
-        if not hasattr(self, "code"):
-            self.code = code
-        if not hasattr(self, "globals"):
-            self.globals = globals
-        if not hasattr(self, "locals"):
-            self.locals = locals
-
-@dataclass
-class Session:
-    cache:   dict[str, ExecutionInfo] = field(default_factory=lambda: {})
-    globals: dict[str, Any] = field(default_factory=lambda: {})
-    locals:  dict[str, Any] = field(default_factory=lambda: {})
-
-    @property
-    def variables(self) -> dict[str, Any]:
-        return self.globals | self.locals
-
-    @variables.setter
-    def variables(self, value: tuple[dict[str, Any], dict[str, Any]]):
-        globals, locals = value
-        self.globals.update(globals)
-        self.locals.update(locals)

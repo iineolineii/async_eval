@@ -1,7 +1,7 @@
 from typing import Any, Union
 
 from .evaluator import AEvaluator
-from .utils import EmptyResult
+from .types import EmptyResult
 
 Evaluator = AEvaluator
 
@@ -26,7 +26,7 @@ async def aeval(
     		Considered as locals.
 
     Returns:
-    	Result of code evaluation or `~utils.EmptyResult` if the result is empty.
+    	Result of code evaluation or `~types.EmptyResult` if the result is empty.
     """
     return await AEvaluator().aeval(code, glb, isolate=True, **additional_vars)
 
