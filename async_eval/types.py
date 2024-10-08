@@ -4,10 +4,18 @@ import sys
 from copy import copy
 from dataclasses import dataclass, field
 from types import TracebackType
-from typing import Any, NoReturn, final, overload
+from typing import Any, NoReturn, Optional, TypeVar, Union, final, overload
 
 from .utils import CustomBuiltins
 
+
+AST = TypeVar("AST", bound=ast.AST)
+stmt = TypeVar("stmt", bound=ast.stmt)
+For = TypeVar("For", bound=Union[ast.For, ast.AsyncFor])
+With = TypeVar("With", bound=Union[ast.With, ast.AsyncWith])
+Try = TypeVar("Try", bound=ast.Try)
+if sys.version_info >= (3, 11):
+    Try = TypeVar("Try", bound=Union[ast.Try, ast.TryStar])
 
 # TODO: If they'll add another contextual expression
 # we would need to add it here too
@@ -35,7 +43,7 @@ class NodeTransformer:
 
         return self.module
 
-    def patch_returns[AST: ast.AST](
+    def patch_returns(
         self,
         node: AST
     ) -> AST:
@@ -59,10 +67,10 @@ class NodeTransformer:
 
         return node
 
-    def patch_statement[stmt: ast.stmt](
+    def patch_statement(
         self,
         node: stmt
-    ) -> stmt | ast.Raise:
+    ) -> Union[stmt, ast.Raise]:
         node.end_lineno = getattr(node, "end_lineno", node.lineno)
 
         if isinstance(node, ast.Assign):
@@ -83,20 +91,23 @@ class NodeTransformer:
         elif isinstance(node, (ast.With, ast.AsyncWith)):
             node = self.handle_With(node)
 
-        elif isinstance(node, (ast.Try, ast.TryStar)):
-            node = self.handle_Try(node)
-
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             node = self.handle_Import(node) # type: ignore
 
         elif isinstance(node, ast.Expr):
             node = self.handle_Expr(node)
 
-        elif isinstance(node, ast.Match):
-            node = self.handle_Match(node)
+        elif sys.version_info >= (3, 10):
+            if isinstance(node, ast.Match):
+                node = self.handle_Match(node)
 
-        elif isinstance(node, ast.TypeAlias):
-            node = self.handle_TypeAlias(node)
+            elif sys.version_info >= (3, 11):
+                if isinstance(node, (ast.Try, ast.TryStar)):
+                    node = self.handle_Try(node)
+
+                elif sys.version_info >= (3, 12):
+                    if isinstance(node, ast.TypeAlias):
+                        node = self.handle_TypeAlias(node)
 
         return node
 
@@ -143,7 +154,7 @@ class NodeTransformer:
 
         return self.handle_Assign(ast.Assign(targets=targets, value=value)) # type: ignore
 
-    def handle_For[For: ast.For | ast.AsyncFor](
+    def handle_For(
         self,
         node: For
     ) -> For:
@@ -167,7 +178,7 @@ class NodeTransformer:
 
         return node
 
-    def handle_With[With: ast.With | ast.AsyncWith](
+    def handle_With(
         self,
         node: With
     ) -> With:
@@ -175,7 +186,7 @@ class NodeTransformer:
         node.body[-1] = self.patch_statement(node.body[-1])
         return node
 
-    def handle_Try[Try: ast.Try | ast.TryStar](
+    def handle_Try(
         self,
         node: Try
     ) -> Try:
@@ -196,7 +207,7 @@ class NodeTransformer:
 
     def handle_Import(
         self,
-        node: ast.Import | ast.ImportFrom
+        node: Union[ast.Import, ast.ImportFrom]
     ):
         names = [
             ast.Name(name.asname or name.name)
@@ -216,20 +227,31 @@ class NodeTransformer:
         value = node.value
         return self.exit_node(result=value)
 
-    def handle_Match(
-        self,
-        node: ast.Match
-    ) -> ast.Match:
-        for case in node.cases:
-            case.body[-1] = self.patch_statement(case.body[-1])
+    if sys.version_info >= (3, 10):
+        def handle_Match(
+            self,
+            node: Match
+        ) -> Match:
+            for case in node.cases:
+                case.body[-1] = self.patch_statement(case.body[-1])
 
-        return node
+            return node
 
-    def handle_TypeAlias(
-        self,
-        node: ast.TypeAlias
-    ):
-        return self.handle_Assign(ast.Assign([node.name], node.value))
+        if sys.version_info >= (3, 12):
+            def handle_TypeAlias(
+                self,
+                node: ast.TypeAlias
+            ):
+                return self.handle_Assign(ast.Assign([node.name], node.value))
+
+            def assign_type_param(
+                self,
+                param: ast.type_param
+            ):
+                return ast.NamedExpr(
+                    target=ast.Name(id=param.name, ctx=ast.Store()), # type: ignore
+                    value=param # type: ignore
+                )
 
 
     # Utilities
@@ -257,8 +279,8 @@ class NodeTransformer:
     def exit_node(
         self,
         *,
-        result: ast.expr | None = None,
-        source: ast.AST | None = None # type: ignore
+        result: Optional[ast.expr] = None,
+        source: Optional[ast.AST] = None # type: ignore
     ) -> ast.Raise:
         """
         Allows to get the result of code evaluation and carry its globals and locals
@@ -319,15 +341,6 @@ class NodeTransformer:
         patched = ast.copy_location(patched, source)
         return ast.fix_missing_locations(patched)
 
-    def assign_type_param(
-        self,
-        param: ast.type_param
-    ):
-        return ast.NamedExpr(
-            target=ast.Name(id=param.name, ctx=ast.Store()), # type: ignore
-            value=param # type: ignore
-        )
-
     def parse_expr(
         self,
         source: str
@@ -369,7 +382,7 @@ class ExecutionContext:
         Local variables of the execution.
         Defaults to an empty dictionary.
     """
-    exc_info: tuple[type[BaseException], BaseException, TracebackType | None] = field(init=False)
+    exc_info: tuple[type[BaseException], BaseException, Optional[TracebackType]] = field(init=False)
     """
     exc_info (`tuple[type[BaseException], BaseException, TracebackType | None]`, *optional*):
         Exception information of the execution.
@@ -460,10 +473,10 @@ class EmptyResult:
 @dataclass
 class PatchedFrame:
     filename: str
-    lineno: int | None
+    lineno: Optional[int]
     name: str
-    line: str | None = field(default=None)
-    pointer: str | None = field(default=None)
+    line: Optional[str] = field(default=None)
+    pointer: Optional[str] = field(default=None)
 
     def __str__(self) -> str:
 
