@@ -14,6 +14,8 @@ stmt = TypeVar("stmt", bound=ast.stmt)
 For = TypeVar("For", bound=Union[ast.For, ast.AsyncFor])
 With = TypeVar("With", bound=Union[ast.With, ast.AsyncWith])
 Try = TypeVar("Try", bound=ast.Try)
+if sys.version_info >= (3, 10):
+    Match = TypeVar("Match", bound=ast.Match)
 if sys.version_info >= (3, 11):
     Try = TypeVar("Try", bound=Union[ast.Try, ast.TryStar])
 
